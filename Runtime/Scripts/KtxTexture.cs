@@ -19,6 +19,7 @@ using UnityEngine.Profiling;
 using Unity.Collections;
 using UnityEngine.Assertions;
 using UnityEngine.Rendering;
+using UnityEngine.Networking;
 
 namespace KtxUnity {
     public class KtxTexture : TextureBase {
@@ -48,6 +49,77 @@ namespace KtxUnity {
         public uint numFaces => m_Ktx.numFaces;
         public TextureOrientation orientation => m_Ktx.orientation;
         
+        public async Task<CubemapResult> LoadCubemapFromStreamingAssets(
+            string filePath,
+            bool linear = false,
+            uint layer = 0,
+            uint mipLevel = 0,
+            bool mipChain = true,
+            uint? hdrExposureLayer = null,
+            TranscodeFormatTuple? customFormat = null
+            )
+        {
+            var url = GetStreamingAssetsUrl(filePath);
+            return await LoadCubemapFile(url,linear,layer,mipLevel,mipChain,hdrExposureLayer,customFormat);
+        }
+
+        async Task<CubemapResult> LoadCubemapFile(
+            string url,
+            bool linear = false,
+            uint layer = 0,
+            uint mipLevel = 0,
+            bool mipChain = true,
+            uint? hdrExposureLayer = null,
+            TranscodeFormatTuple? customFormat = null
+            )
+        {
+            var webRequest = UnityWebRequest.Get(url);
+            var asyncOp = webRequest.SendWebRequest();
+            while (!asyncOp.isDone) {
+                await Task.Yield();
+            }
+
+            if(!string.IsNullOrEmpty(webRequest.error)) {
+#if DEBUG
+                Debug.LogErrorFormat("Error loading {0}: {1}",url,webRequest.error);
+#endif
+                return new CubemapResult(ErrorCode.OpenUriFailed);
+            }
+
+            var buffer = webRequest.downloadHandler.data;
+            
+            using (var bufferWrapped = new ManagedNativeArray(buffer)) {
+                return await LoadCubemapFromBytes(
+                    bufferWrapped.nativeArray,
+                    linear,
+                    layer,
+                    mipLevel,
+                    mipChain,
+                    hdrExposureLayer,
+                    customFormat
+                    );
+            }
+        }
+        
+        public async Task<CubemapResult> LoadCubemapFromBytes(
+            NativeSlice<byte> data,
+            bool linear = false,
+            uint layer = 0,
+            uint mipLevel = 0,
+            bool mipChain = true,
+            uint? hdrExposureLayer = null,
+            TranscodeFormatTuple? customFormat = null
+            )
+        {
+            var result = new CubemapResult {
+                errorCode = Open(data)
+            };
+            if (result.errorCode != ErrorCode.Success) return result;
+            result = await LoadCubemap(linear,layer,mipLevel,mipChain,hdrExposureLayer,customFormat);
+            Dispose();
+            return result;
+        }
+
         /// <inheritdoc />
         public override async Task<TextureResult> LoadTexture2D(
             bool linear = false,
@@ -132,6 +204,104 @@ namespace KtxUnity {
             Profiler.EndSample();
             return result;
         }
+
+        /// <inheritdoc />
+        public async Task<CubemapResult> LoadCubemap(
+            bool linear = false,
+            uint layer = 0,
+            uint mipLevel = 0,
+            bool mipChain = true,
+            uint? hdrExposureLayer = null,
+            TranscodeFormatTuple? customFormat = null
+            )
+        {
+
+            var result = new CubemapResult();
+
+            if(m_Ktx.valid) {
+                if(m_Ktx.ktxClass==KtxClassId.ktxTexture2_c) {
+                    if(m_Ktx.needsTranscoding) {
+                        result.errorCode = await TranscodeInternal(m_Ktx,linear,layer,0,mipLevel,customFormat);
+                        result.orientation = m_Ktx.orientation;
+                    }
+                    else {
+                        if (m_Format == GraphicsFormat.None) {
+                            m_Format = m_Ktx.graphicsFormat;
+                            if (m_Format == GraphicsFormat.None) {
+                                result.errorCode = ErrorCode.UnsupportedFormat;
+                            } else
+                            if(!SystemInfo.IsFormatSupported(m_Format ,linear ? FormatUsage.Linear : FormatUsage.Sample)) {
+                                result.errorCode = ErrorCode.FormatUnsupportedBySystem;
+                            }
+                        }
+                    }
+                } else {
+                    result.errorCode = ErrorCode.UnsupportedVersion;
+                }
+            } else {
+                result.errorCode = ErrorCode.LoadingFailed;
+            }
+
+            if (result.errorCode != ErrorCode.Success) {
+                return result;
+            }
+        
+            Assert.IsTrue(m_Ktx.valid);
+            Profiler.BeginSample("CreateTexture");
+            
+#if KTX_UNITY_GPU_UPLOAD
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLCore
+                || SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES2
+                || SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3
+               )
+            {
+                m_Ktx.EnqueueForGpuUpload();
+                
+                Texture2D texture;
+                bool success;
+                while (!m_Ktx.TryCreateTexture(out texture, out success, m_Format)) {
+                    Profiler.EndSample();
+                    await Task.Yield();
+                }
+                
+                if (success) {
+                    return new TextureResult {
+                        texture = texture
+                    };
+                }
+                return new TextureResult(ErrorCode.LoadingFailed);
+            }
+#endif
+
+            try {
+                if(hdrExposureLayer.HasValue){
+                    var texture = m_Ktx.LoadHDRTextureData(
+                        m_Format,
+                        layer,
+                        hdrExposureLayer.Value,
+                        mipLevel,
+                        mipChain
+                    );
+                    result.texture = texture;
+                }
+                else{
+                    var texture = m_Ktx.LoadTextureData(
+                        m_Format,
+                        layer,
+                        mipLevel,
+                        mipChain
+                    );
+                    result.texture = texture;
+                }
+                
+            }
+            catch (UnityException) {
+                result.errorCode = ErrorCode.LoadingFailed;
+            }
+            
+            Profiler.EndSample();
+            return result;
+        }
         
         /// <inheritdoc />
         public override void Dispose() {
@@ -143,7 +313,8 @@ namespace KtxUnity {
             bool linear,
             uint layer,
             uint faceSlice,
-            uint mipLevel
+            uint mipLevel,
+            TranscodeFormatTuple? customFormat = null
             )
         {
 
@@ -168,8 +339,8 @@ namespace KtxUnity {
 
             var result = ErrorCode.Success;
             
-            var formats = GetFormat(ktx,ktx,linear);
-
+            var formats = customFormat ?? GetFormat(ktx,ktx,linear);
+            
             if(formats.HasValue) {
                 m_Format = formats.Value.format;
 

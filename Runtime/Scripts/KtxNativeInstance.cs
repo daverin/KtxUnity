@@ -23,9 +23,9 @@ using Unity.Jobs;
 using IntPtr=System.IntPtr;
 
 namespace KtxUnity {
-
     public class KtxNativeInstance : IMetaData, ILevelInfo
     {
+        const int RGBM_MAX_RANGE = 256;
 #if UNITY_EDITOR_OSX || UNITY_WEBGL || (UNITY_IOS && !UNITY_EDITOR)
         public const string INTERFACE_DLL = "__Internal";
 #elif UNITY_ANDROID || UNITY_STANDALONE || UNITY_WSA || UNITY_EDITOR || PLATFORM_LUMIN
@@ -226,9 +226,7 @@ namespace KtxUnity {
             uint faceSlice = 0,
             bool mipChain = true
             ) 
-        {
-            
-            Profiler.BeginSample("LoadTextureData");
+        {            
             var levelCount = numLevels;
             var levelsNeeded = mipChain ? levelCount - mipLevel : 1;
             var mipmap = levelsNeeded>1;
@@ -246,16 +244,18 @@ namespace KtxUnity {
                 (int)width,
                 (int)height,
                 gf,
-                mipmap ? TextureCreationFlags.MipChain : TextureCreationFlags.None
+                TextureCreationFlags.None
             );
             Profiler.EndSample();
 
             ktx_get_data(nativeReference,out var data,out var length);
             
             if(mipmap) {
+                Debug.Log("Loading mip enabled");
                 Profiler.BeginSample("MipMapCopy");
 
                 for (var level = 0u; level < mipLevel; level++) {
+                    Debug.Log($"Loading mip level {level}");
                     length -= ktx_get_image_size(nativeReference, level);
                 }
                 
@@ -278,6 +278,7 @@ namespace KtxUnity {
                 reorderedData.Dispose();
                 Profiler.EndSample();
             } else {
+                Debug.Log("Loading");
                 Profiler.BeginSample("LoadRawTextureData");
                 if (mipLevel > 0 || levelCount!=levelsNeeded || layer>0 || faceSlice>0) {
                     var result = ktx_get_image_offset(
@@ -299,6 +300,217 @@ namespace KtxUnity {
             texture.Apply(false,true);
             Profiler.EndSample();
             return texture;
+        }
+
+        public unsafe Cubemap LoadTextureData(
+            GraphicsFormat gf,
+            uint layer = 0,
+            uint mipLevel = 0,
+            bool mipChain = true,
+            FilterMode filterMode = FilterMode.Bilinear,
+            TextureWrapMode wrapMode = TextureWrapMode.Repeat
+            ) 
+        {         
+            var levelCount = numLevels;
+            var levelsNeeded = mipChain ? levelCount - mipLevel : 1;
+            var mipmap = levelsNeeded>1;
+
+            Debug.Log($"LoadTextureData levelCount={levelCount} levelsNeeded={levelsNeeded}");
+
+            var width = baseWidth;
+            var height = baseHeight;
+
+            mipLevel = 0;
+
+            if (mipLevel > 0) {
+                width = Math.Max(1u, width >> (int)mipLevel);
+                height = Math.Max(1u, height >> (int)mipLevel);
+                Debug.Log($"width={width} height={height}");
+            }
+            
+            Debug.Log($"Creating Cubemap Texture");
+            var cubemapTexture = new Cubemap(
+                (int)width,
+                gf,
+                mipmap ? TextureCreationFlags.MipChain : TextureCreationFlags.None
+            );
+            cubemapTexture.filterMode = filterMode;
+            cubemapTexture.wrapMode = wrapMode;
+
+            ktx_get_data(nativeReference,out var data,out var length);
+            
+            Debug.Log($"ktx_get_data_length={length}");
+
+
+            for (var level = 0u; level < mipLevel; level++) {
+                
+                length -= ktx_get_image_size(nativeReference, level);
+            }
+            Debug.Log($"new_length={length}");
+            
+            
+            for(uint faceSlice = 0; faceSlice< 6; faceSlice++){
+                
+                Debug.Log($"loading faceSlice={faceSlice} length={length}");
+                var reorderedData = new NativeArray<byte>((int)length,Allocator.Temp);
+                var reorderedDataPtr = reorderedData.GetUnsafePtr();
+
+
+                var result = ktx_copy_data_levels_reverted(
+                    nativeReference,
+                    mipLevel,
+                    layer,
+                    faceSlice,
+                    reorderedDataPtr,
+                (uint)reorderedData.Length
+                );
+
+                if (result != KtxErrorCode.KTX_SUCCESS) {
+                    Debug.LogError("Error on ktx_copy_data_levels_reverted");
+                    return cubemapTexture;
+                }
+
+                var offset = 0u;
+                for(uint mL = 0; mL< levelsNeeded ;mL++){
+                    if(mL > 0){
+                        offset += ktx_get_image_size(nativeReference, mL-1);
+                    }
+                    cubemapTexture.SetPixelData(reorderedData,(int)mL,(CubemapFace)faceSlice, sourceDataStartIndex: (int)offset);
+                }
+                
+                Debug.Log($"cubemapTexture mipmapCount={cubemapTexture.mipmapCount} loadedMipmapLevel={cubemapTexture.loadedMipmapLevel} streamingMipmaps={cubemapTexture.streamingMipmaps}");
+
+                
+                Profiler.EndSample();
+                reorderedData.Dispose();
+                Profiler.EndSample();
+            }
+            cubemapTexture.Apply(false,true);
+            return cubemapTexture;
+        }
+
+        public unsafe Cubemap LoadHDRTextureData(
+            GraphicsFormat gf,
+            uint layer = 0,
+            uint exposurelayer = 0,
+            uint mipLevel = 0,
+            bool mipChain = true,
+            FilterMode filterMode = FilterMode.Trilinear,
+            TextureWrapMode wrapMode = TextureWrapMode.Clamp
+        ) 
+        {         
+            var levelCount = numLevels;
+            var levelsNeeded = mipChain ? levelCount - mipLevel : 1;
+            var mipmap = levelsNeeded>1;
+
+            Debug.Log($"LoadTextureData levelCount={levelCount} levelsNeeded={levelsNeeded} layer={layer} exposurelayer={exposurelayer}");
+
+            var width = baseWidth;
+            var height = baseHeight;
+
+            mipLevel = 0;
+
+            if (mipLevel > 0) {
+                width = Math.Max(1u, width >> (int)mipLevel);
+                height = Math.Max(1u, height >> (int)mipLevel);
+                Debug.Log($"width={width} height={height}");
+            }
+            
+            Debug.Log($"Creating Cubemap Texture");
+            var cubemapTexture = new Cubemap(
+                (int)width,
+                GraphicsFormat.R16G16B16A16_SFloat,
+                mipmap ? TextureCreationFlags.MipChain : TextureCreationFlags.None
+            );
+
+            cubemapTexture.filterMode = filterMode;
+            cubemapTexture.wrapMode = wrapMode;
+
+            ktx_get_data(nativeReference,out var data,out var length);
+            
+            Debug.Log($"ktx_get_data_length={length}");
+
+            if(mipmap) {
+                Debug.Log("Loading mip enabled");
+
+                for (var level = 0u; level < mipLevel; level++) {
+                    
+                    length -= ktx_get_image_size(nativeReference, level);
+                }
+                Debug.Log($"new_length={length}");
+                
+                
+                for(uint faceSlice = 0; faceSlice< 6; faceSlice++){
+                    
+                    Debug.Log($"loading faceSlice={faceSlice} length={length}");
+                    var reorderedData = new NativeArray<byte>((int)length,Allocator.Temp);
+                    var reorderedDataPtr = reorderedData.GetUnsafePtr();
+
+                    var result = ktx_copy_data_levels_reverted(
+                        nativeReference,
+                        mipLevel,
+                        layer,
+                        faceSlice,
+                        reorderedDataPtr,
+                    (uint)reorderedData.Length
+                    );
+
+                    if (result != KtxErrorCode.KTX_SUCCESS) {
+                        Debug.LogError("Error on ktx_copy_data_levels_reverted");
+                        return cubemapTexture;
+                    }
+
+                    var reorderedExposureData = new NativeArray<byte>((int)length,Allocator.Temp);
+                    var reorderedExposureDataPtr = reorderedExposureData.GetUnsafePtr();
+
+                    var exposureResult = ktx_copy_data_levels_reverted(
+                        nativeReference,
+                        mipLevel,
+                        exposurelayer,
+                        faceSlice,
+                        reorderedExposureDataPtr,
+                    (uint)reorderedExposureData.Length
+                    );
+
+                    if (exposureResult != KtxErrorCode.KTX_SUCCESS) {
+                        Debug.LogError("Error on ktx_copy_data_levels_reverted");
+                        return cubemapTexture;
+                    }
+                    
+                    var colors = reorderedData.Reinterpret<Color32>(1);
+                    var exposures = reorderedExposureData.Reinterpret<Color32>(1);
+
+                    var floatColors = new Color[colors.Length];
+
+                    for(int i = 0; i< floatColors.Length; i++){
+                        floatColors[i] = colors[i];
+                        floatColors[i] = floatColors[i] * RGBM_MAX_RANGE *  ((float)exposures[i].r / 255);
+                    }
+
+                    var offset = 0u;
+                    for(uint mL = 0; mL< levelsNeeded ;mL++){
+                        var size = (ktx_get_image_size(nativeReference, mL) /4);
+                        if(mL > 0){
+                            offset += (ktx_get_image_size(nativeReference, mL-1) /4);
+                        }
+                        var segment = new ArraySegment<Color>( floatColors, (int)(offset), (int)(size));
+                        cubemapTexture.SetPixels(segment.ToArray(),(CubemapFace)faceSlice,(int)mL);
+                    }
+                    
+                    Debug.Log($"cubemapTexture mipmapCount={cubemapTexture.mipmapCount} loadedMipmapLevel={cubemapTexture.loadedMipmapLevel} streamingMipmaps={cubemapTexture.streamingMipmaps}");
+
+                    colors.Dispose();
+                    exposures.Dispose();
+                    reorderedData.Dispose();
+                    reorderedExposureData.Dispose();
+                }
+            } else {
+                throw new NotImplementedException();
+            }
+            cubemapTexture.requestedMipmapLevel = 2;
+            cubemapTexture.Apply(false,true);
+            // UnityEngine.Object.Destroy(texture);
+            return cubemapTexture;
         }
 
         /// <summary>
