@@ -63,8 +63,8 @@ namespace KtxUnity {
             return await LoadCubemapFile(url,linear,layer,mipLevel,mipChain,hdrExposureLayer,customFormat);
         }
 
-        async Task<CubemapResult> LoadCubemapFile(
-            string url,
+        public async Task<CubemapResult> LoadCubemapFile(
+            string filePath,
             bool linear = false,
             uint layer = 0,
             uint mipLevel = 0,
@@ -73,7 +73,9 @@ namespace KtxUnity {
             TranscodeFormatTuple? customFormat = null
             )
         {
-            var webRequest = UnityWebRequest.Get(url);
+            filePath = $"file://{filePath}";
+            
+            var webRequest = UnityWebRequest.Get(filePath);
             var asyncOp = webRequest.SendWebRequest();
             while (!asyncOp.isDone) {
                 await Task.Yield();
@@ -81,7 +83,7 @@ namespace KtxUnity {
 
             if(!string.IsNullOrEmpty(webRequest.error)) {
 #if DEBUG
-                Debug.LogErrorFormat("Error loading {0}: {1}",url,webRequest.error);
+                Debug.LogErrorFormat("Error loading {0}: {1}",filePath,webRequest.error);
 #endif
                 return new CubemapResult(ErrorCode.OpenUriFailed);
             }
